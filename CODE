@@ -1,0 +1,418 @@
+-- =====================================================================
+-- COURIER MANAGEMENT SYSTEM DATABASE
+-- DBMS Mini Project
+-- =====================================================================
+-- Models a real courier company (think DTDC / Blue Dart / FedEx):
+-- branches book, route and deliver parcels ("shipments"), and every
+-- shipment carries a live status history, just like a tracking page.
+--
+-- Run this whole file top to bottom in MySQL (8.0+):
+--   mysql -u root -p < courier_management_system.sql
+-- =====================================================================
+
+DROP DATABASE IF EXISTS courier_management_system;
+CREATE DATABASE courier_management_system;
+USE courier_management_system;
+
+-- =====================================================================
+-- SECTION 1: TABLES
+-- =====================================================================
+
+-- ---------------------------------------------------------------------
+-- 1.1 BRANCHES — every physical office of the courier company
+-- ---------------------------------------------------------------------
+CREATE TABLE branches (
+    branch_id       INT AUTO_INCREMENT PRIMARY KEY,
+    branch_name     VARCHAR(60)  NOT NULL,
+    city            VARCHAR(40)  NOT NULL,
+    state           VARCHAR(40)  NOT NULL,
+    address         VARCHAR(150) NOT NULL,
+    contact_number  VARCHAR(15)  NOT NULL,
+    CONSTRAINT uq_branch_contact UNIQUE (contact_number)
+);
+
+-- ---------------------------------------------------------------------
+-- 1.2 CUSTOMERS — people who book shipments (the senders)
+-- ---------------------------------------------------------------------
+CREATE TABLE customers (
+    customer_id     INT AUTO_INCREMENT PRIMARY KEY,
+    full_name       VARCHAR(60)  NOT NULL,
+    phone           VARCHAR(15)  NOT NULL,
+    email           VARCHAR(80),
+    address         VARCHAR(150) NOT NULL,
+    city            VARCHAR(40)  NOT NULL,
+    CONSTRAINT uq_customer_phone UNIQUE (phone)
+);
+
+-- ---------------------------------------------------------------------
+-- 1.3 EMPLOYEES — staff working out of a branch
+-- ---------------------------------------------------------------------
+CREATE TABLE employees (
+    employee_id     INT AUTO_INCREMENT PRIMARY KEY,
+    full_name       VARCHAR(60) NOT NULL,
+    role            ENUM('Manager','Delivery Agent','Clerk','Driver') NOT NULL,
+    branch_id       INT NOT NULL,
+    phone           VARCHAR(15) NOT NULL,
+    hire_date       DATE NOT NULL,
+    FOREIGN KEY (branch_id) REFERENCES branches(branch_id)
+        ON UPDATE CASCADE ON DELETE RESTRICT
+);
+
+-- ---------------------------------------------------------------------
+-- 1.4 VEHICLES — delivery vehicles stationed at a branch
+-- ---------------------------------------------------------------------
+CREATE TABLE vehicles (
+    vehicle_id      INT AUTO_INCREMENT PRIMARY KEY,
+    vehicle_number  VARCHAR(20) NOT NULL UNIQUE,
+    vehicle_type    ENUM('Bike','Van','Truck') NOT NULL,
+    capacity_kg     DECIMAL(6,2) NOT NULL,
+    branch_id       INT NOT NULL,
+    FOREIGN KEY (branch_id) REFERENCES branches(branch_id)
+        ON UPDATE CASCADE ON DELETE RESTRICT
+);
+
+-- ---------------------------------------------------------------------
+-- 1.5 SHIPMENTS — the core entity: one row per parcel booked
+-- ---------------------------------------------------------------------
+CREATE TABLE shipments (
+    shipment_id             INT AUTO_INCREMENT PRIMARY KEY,
+    tracking_number         VARCHAR(15) NOT NULL UNIQUE,
+    customer_id             INT NOT NULL,
+    receiver_name           VARCHAR(60) NOT NULL,
+    receiver_phone          VARCHAR(15) NOT NULL,
+    receiver_address        VARCHAR(150) NOT NULL,
+    origin_branch_id        INT NOT NULL,
+    destination_branch_id   INT NOT NULL,
+    package_weight_kg       DECIMAL(6,2) NOT NULL CHECK (package_weight_kg > 0),
+    package_type            ENUM('Document','Parcel','Fragile') NOT NULL DEFAULT 'Parcel',
+    booking_date             DATE NOT NULL,
+    expected_delivery_date   DATE NOT NULL,
+    delivered_date            DATE,
+    current_status             ENUM('Booked','Picked Up','In Transit','Out for Delivery',
+                                     'Delivered','Returned','Cancelled') NOT NULL DEFAULT 'Booked',
+    shipping_cost               DECIMAL(8,2) NOT NULL,
+    FOREIGN KEY (customer_id)           REFERENCES customers(customer_id) ON UPDATE CASCADE  ON DELETE RESTRICT,
+    -- origin/destination stay ON UPDATE RESTRICT (not CASCADE): a CHECK constraint can't
+    -- sit on a column that a cascading update might silently change without re-validating it
+    FOREIGN KEY (origin_branch_id)      REFERENCES branches(branch_id)   ON UPDATE RESTRICT ON DELETE RESTRICT,
+    FOREIGN KEY (destination_branch_id) REFERENCES branches(branch_id)   ON UPDATE RESTRICT ON DELETE RESTRICT,
+    CONSTRAINT chk_origin_not_dest CHECK (origin_branch_id <> destination_branch_id)
+);
+
+CREATE INDEX idx_shipment_status   ON shipments(current_status);
+CREATE INDEX idx_shipment_customer ON shipments(customer_id);
+
+-- ---------------------------------------------------------------------
+-- 1.6 DELIVERY_ASSIGNMENTS — which employee + vehicle handled which leg
+--     of a shipment's journey (a shipment can have several legs: pickup,
+--     a branch transfer, then final delivery)
+-- ---------------------------------------------------------------------
+CREATE TABLE delivery_assignments (
+    assignment_id   INT AUTO_INCREMENT PRIMARY KEY,
+    shipment_id     INT NOT NULL,
+    employee_id     INT NOT NULL,
+    vehicle_id      INT NOT NULL,
+    assigned_date   DATE NOT NULL,
+    leg             ENUM('Pickup','Transfer','Final Delivery') NOT NULL DEFAULT 'Final Delivery',
+    FOREIGN KEY (shipment_id) REFERENCES shipments(shipment_id) ON UPDATE CASCADE ON DELETE CASCADE,
+    FOREIGN KEY (employee_id) REFERENCES employees(employee_id) ON UPDATE CASCADE ON DELETE RESTRICT,
+    FOREIGN KEY (vehicle_id)  REFERENCES vehicles(vehicle_id)   ON UPDATE CASCADE ON DELETE RESTRICT
+);
+
+-- ---------------------------------------------------------------------
+-- 1.7 SHIPMENT_TRACKING — status history: the "live tracking" log
+-- ---------------------------------------------------------------------
+CREATE TABLE shipment_tracking (
+    tracking_log_id INT AUTO_INCREMENT PRIMARY KEY,
+    shipment_id     INT NOT NULL,
+    status          ENUM('Booked','Picked Up','In Transit','Out for Delivery',
+                          'Delivered','Returned','Cancelled') NOT NULL,
+    location        VARCHAR(60) NOT NULL,
+    updated_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    remarks         VARCHAR(150),
+    FOREIGN KEY (shipment_id) REFERENCES shipments(shipment_id) ON UPDATE CASCADE ON DELETE CASCADE
+);
+
+-- ---------------------------------------------------------------------
+-- 1.8 PAYMENTS — one payment record per shipment
+-- ---------------------------------------------------------------------
+CREATE TABLE payments (
+    payment_id      INT AUTO_INCREMENT PRIMARY KEY,
+    shipment_id     INT NOT NULL UNIQUE,
+    amount          DECIMAL(8,2) NOT NULL,
+    payment_mode    ENUM('Cash','Card','UPI','Online') NOT NULL,
+    payment_status  ENUM('Pending','Paid','Refunded') NOT NULL DEFAULT 'Pending',
+    payment_date    DATE,
+    FOREIGN KEY (shipment_id) REFERENCES shipments(shipment_id) ON UPDATE CASCADE ON DELETE CASCADE
+);
+
+
+-- =====================================================================
+-- SECTION 2: SAMPLE DATA
+-- =====================================================================
+
+INSERT INTO branches (branch_name, city, state, address, contact_number) VALUES
+('Delhi Central Hub',            'Delhi',      'Delhi',       '12 Connaught Place',        '01144556677'),
+('Mumbai Andheri Branch',        'Mumbai',     'Maharashtra', '45 Andheri East',           '02233445566'),
+('Bangalore Koramangala Branch', 'Bangalore',  'Karnataka',   '78 Koramangala 4th Block',  '08099887766'),
+('Pune Hinjewadi Branch',        'Pune',       'Maharashtra', '23 Hinjewadi Phase 1',      '02066778899');
+
+INSERT INTO customers (full_name, phone, email, address, city) VALUES
+('Rohan Mehta',    '9811122233', 'rohan.mehta@example.com',    '14 Rajouri Garden',  'Delhi'),
+('Ananya Sharma',  '9822233344', 'ananya.sharma@example.com',  '56 Bandra West',     'Mumbai'),
+('Vikram Rao',     '9833344455', 'vikram.rao@example.com',     '89 Indiranagar',     'Bangalore'),
+('Priya Nair',     '9844455566', 'priya.nair@example.com',     '12 Kothrud',         'Pune'),
+('Aditya Verma',   '9855566677', 'aditya.verma@example.com',   '34 Karol Bagh',      'Delhi'),
+('Sneha Kulkarni', '9866677788', 'sneha.kulkarni@example.com', '67 Powai',           'Mumbai');
+
+INSERT INTO employees (full_name, role, branch_id, phone, hire_date) VALUES
+('Suresh Kumar', 'Manager',        1, '9911100011', '2022-01-10'),
+('Meena Iyer',   'Delivery Agent', 1, '9911100012', '2022-03-15'),
+('Farhan Sheikh','Delivery Agent', 2, '9911100013', '2022-05-20'),
+('Kavya Reddy',  'Clerk',          3, '9911100014', '2023-01-05'),
+('Arjun Singh',  'Driver',         2, '9911100015', '2022-08-11'),
+('Divya Pillai', 'Delivery Agent', 4, '9911100016', '2023-02-18');
+
+INSERT INTO vehicles (vehicle_number, vehicle_type, capacity_kg, branch_id) VALUES
+('DL01AB1234', 'Bike', 20,  1),
+('MH02CD5678', 'Van',  500, 2),
+('KA03EF9012', 'Bike', 20,  3),
+('PN04GH3456', 'Van',  500, 4);
+
+-- cost formula used throughout: Document = flat 40 | Parcel = 50 + 40/kg | Fragile = 80 + 60/kg
+INSERT INTO shipments (tracking_number, customer_id, receiver_name, receiver_phone, receiver_address,
+                        origin_branch_id, destination_branch_id, package_weight_kg, package_type,
+                        booking_date, expected_delivery_date, delivered_date, current_status, shipping_cost) VALUES
+('CMS2026000001', 1, 'Neha Kapoor',    '9700011122', '5 Bandra Kurla Complex, Mumbai', 1, 2, 2.5,  'Parcel',   '2026-08-01', '2026-08-05', '2026-08-04', 'Delivered',        150.00),
+('CMS2026000002', 2, 'Ritesh Shah',    '9700022233', '19 Whitefield, Bangalore',       2, 3, 1.0,  'Document', '2026-08-10', '2026-08-13', NULL,         'In Transit',        40.00),
+('CMS2026000003', 3, 'Ishaan Kulkarni','9700033344', '8 Baner Road, Pune',             3, 4, 5.0,  'Fragile',  '2026-08-12', '2026-08-16', NULL,         'Out for Delivery',  380.00),
+('CMS2026000004', 4, 'Meera Joshi',    '9700044455', '21 Karol Bagh, Delhi',           4, 1, 0.5,  'Document', '2026-09-01', '2026-09-04', NULL,         'Booked',             40.00),
+('CMS2026000005', 5, 'Kunal Bhatt',    '9700055566', '3 Andheri West, Mumbai',         1, 2, 3.2,  'Parcel',   '2026-07-20', '2026-07-24', '2026-07-23', 'Delivered',        178.00),
+('CMS2026000006', 6, 'Tanvi Desai',    '9700066677', '11 Koramangala, Bangalore',      2, 3, 10.0, 'Parcel',   '2026-07-25', '2026-07-30', NULL,         'Cancelled',        450.00),
+('CMS2026000007', 1, 'Aakash Pawar',   '9700077788', '6 Hinjewadi, Pune',              1, 4, 1.8,  'Fragile',  '2026-09-05', '2026-09-09', NULL,         'Picked Up',        188.00),
+('CMS2026000008', 3, 'Simran Kaur',    '9700088899', '40 Connaught Place, Delhi',      3, 1, 4.0,  'Parcel',   '2026-06-15', '2026-06-19', '2026-06-18', 'Delivered',        210.00);
+
+INSERT INTO delivery_assignments (shipment_id, employee_id, vehicle_id, assigned_date, leg) VALUES
+(1, 2, 1, '2026-08-02', 'Pickup'),
+(1, 3, 2, '2026-08-04', 'Final Delivery'),
+(3, 6, 4, '2026-08-15', 'Final Delivery'),
+(5, 3, 2, '2026-07-23', 'Final Delivery'),
+(7, 2, 1, '2026-09-06', 'Pickup'),
+(8, 2, 1, '2026-06-18', 'Final Delivery');
+
+INSERT INTO shipment_tracking (shipment_id, status, location, updated_at, remarks) VALUES
+(1, 'Booked',           'Delhi Central Hub',            '2026-08-01 10:00:00', 'Shipment booked'),
+(1, 'Picked Up',        'Delhi Central Hub',             '2026-08-02 09:15:00', 'Picked up from sender'),
+(1, 'In Transit',       'Delhi Central Hub',              '2026-08-02 18:00:00', 'Dispatched to Mumbai'),
+(1, 'Out for Delivery', 'Mumbai Andheri Branch',           '2026-08-04 08:30:00', 'Out for delivery'),
+(1, 'Delivered',        'Mumbai Andheri Branch',            '2026-08-04 14:45:00', 'Delivered to receiver'),
+(2, 'Booked',           'Mumbai Andheri Branch',             '2026-08-10 11:00:00', 'Shipment booked'),
+(2, 'Picked Up',        'Mumbai Andheri Branch',              '2026-08-11 09:00:00', 'Picked up from sender'),
+(2, 'In Transit',       'Mumbai Andheri Branch',               '2026-08-11 20:00:00', 'Dispatched to Bangalore'),
+(3, 'Booked',           'Bangalore Koramangala Branch',         '2026-08-12 10:30:00', 'Shipment booked'),
+(3, 'Picked Up',        'Bangalore Koramangala Branch',          '2026-08-13 09:20:00', 'Picked up from sender'),
+(3, 'In Transit',       'Bangalore Koramangala Branch',           '2026-08-13 19:00:00', 'Dispatched to Pune'),
+(3, 'Out for Delivery', 'Pune Hinjewadi Branch',                   '2026-08-16 08:00:00', 'Out for delivery'),
+(4, 'Booked',           'Pune Hinjewadi Branch',                    '2026-09-01 12:00:00', 'Shipment booked'),
+(6, 'Booked',           'Mumbai Andheri Branch',                     '2026-07-25 10:00:00', 'Shipment booked'),
+(6, 'Cancelled',        'Mumbai Andheri Branch',                      '2026-07-26 09:00:00', 'Cancelled by sender'),
+(7, 'Booked',           'Delhi Central Hub',                          '2026-09-05 09:00:00', 'Shipment booked'),
+(7, 'Picked Up',        'Delhi Central Hub',                          '2026-09-06 10:00:00', 'Picked up from sender'),
+(8, 'Booked',           'Bangalore Koramangala Branch',               '2026-06-15 10:00:00', 'Shipment booked'),
+(8, 'Delivered',        'Delhi Central Hub',                          '2026-06-18 16:00:00', 'Delivered to receiver');
+
+INSERT INTO payments (shipment_id, amount, payment_mode, payment_status, payment_date) VALUES
+(1, 150.00, 'UPI',    'Paid',     '2026-08-01'),
+(2, 40.00,  'Card',   'Paid',     '2026-08-10'),
+(3, 380.00, 'Cash',   'Paid',     '2026-08-12'),
+(4, 40.00,  'UPI',    'Pending',  NULL),
+(5, 178.00, 'Online', 'Paid',     '2026-07-20'),
+(6, 450.00, 'Card',   'Refunded', '2026-07-25'),
+(7, 188.00, 'UPI',    'Paid',     '2026-09-05'),
+(8, 210.00, 'Cash',   'Paid',     '2026-06-15');
+
+
+-- =====================================================================
+-- SECTION 3: VIEWS
+-- =====================================================================
+
+-- One row per shipment with sender, route and payment info joined in —
+-- this is the query a front-end "track my order" page would run.
+CREATE VIEW vw_shipment_details AS
+SELECT
+    s.shipment_id,
+    s.tracking_number,
+    c.full_name          AS sender_name,
+    c.phone               AS sender_phone,
+    s.receiver_name,
+    s.receiver_phone,
+    ob.branch_name          AS origin_branch,
+    db.branch_name           AS destination_branch,
+    s.package_weight_kg,
+    s.package_type,
+    s.current_status,
+    s.booking_date,
+    s.expected_delivery_date,
+    s.delivered_date,
+    s.shipping_cost,
+    p.payment_status
+FROM shipments s
+JOIN customers c    ON s.customer_id = c.customer_id
+JOIN branches  ob   ON s.origin_branch_id = ob.branch_id
+JOIN branches  db   ON s.destination_branch_id = db.branch_id
+LEFT JOIN payments p ON s.shipment_id = p.shipment_id;
+
+-- Revenue and delivery count per branch — a manager's dashboard query.
+CREATE VIEW vw_branch_performance AS
+SELECT
+    b.branch_id,
+    b.branch_name,
+    b.city,
+    COUNT(s.shipment_id)                                                AS total_shipments_originated,
+    SUM(CASE WHEN s.current_status = 'Delivered' THEN 1 ELSE 0 END)     AS delivered_count,
+    ROUND(SUM(s.shipping_cost), 2)                                       AS total_revenue
+FROM branches b
+LEFT JOIN shipments s ON b.branch_id = s.origin_branch_id
+GROUP BY b.branch_id, b.branch_name, b.city;
+
+
+-- =====================================================================
+-- SECTION 4: TRIGGER
+-- =====================================================================
+
+-- Every time a new tracking event is logged, the shipment's master
+-- status (and delivered_date, if it just arrived) updates automatically
+-- — you never have to update shipments and shipment_tracking separately.
+DELIMITER $$
+
+CREATE TRIGGER trg_sync_shipment_status
+AFTER INSERT ON shipment_tracking
+FOR EACH ROW
+BEGIN
+    UPDATE shipments
+    SET current_status = NEW.status,
+        delivered_date = CASE WHEN NEW.status = 'Delivered' THEN DATE(NEW.updated_at) ELSE delivered_date END
+    WHERE shipment_id = NEW.shipment_id;
+END$$
+
+DELIMITER ;
+
+
+-- =====================================================================
+-- SECTION 5: STORED PROCEDURE
+-- =====================================================================
+
+-- Books a brand-new shipment end to end: works out the cost, generates
+-- a tracking number, creates the shipment, logs its first tracking
+-- event, and opens a pending payment record — one call instead of four.
+DELIMITER $$
+
+CREATE PROCEDURE sp_book_shipment (
+    IN p_customer_id INT,
+    IN p_receiver_name VARCHAR(60),
+    IN p_receiver_phone VARCHAR(15),
+    IN p_receiver_address VARCHAR(150),
+    IN p_origin_branch_id INT,
+    IN p_destination_branch_id INT,
+    IN p_weight DECIMAL(6,2),
+    IN p_package_type VARCHAR(20),
+    IN p_expected_delivery_date DATE
+)
+BEGIN
+    DECLARE v_cost DECIMAL(8,2);
+    DECLARE v_tracking_number VARCHAR(15);
+    DECLARE v_shipment_id INT;
+
+    SET v_cost = CASE p_package_type
+        WHEN 'Document' THEN 40.00
+        WHEN 'Fragile'  THEN 80.00 + (p_weight * 60.00)
+        ELSE 50.00 + (p_weight * 40.00)
+    END;
+
+    SET v_tracking_number = CONCAT('CMS', YEAR(CURDATE()), LPAD(FLOOR(RAND() * 999999), 6, '0'));
+
+    INSERT INTO shipments (
+        tracking_number, customer_id, receiver_name, receiver_phone, receiver_address,
+        origin_branch_id, destination_branch_id, package_weight_kg, package_type,
+        booking_date, expected_delivery_date, current_status, shipping_cost
+    ) VALUES (
+        v_tracking_number, p_customer_id, p_receiver_name, p_receiver_phone, p_receiver_address,
+        p_origin_branch_id, p_destination_branch_id, p_weight, p_package_type,
+        CURDATE(), p_expected_delivery_date, 'Booked', v_cost
+    );
+
+    SET v_shipment_id = LAST_INSERT_ID();
+
+    INSERT INTO shipment_tracking (shipment_id, status, location, remarks)
+    SELECT v_shipment_id, 'Booked', branch_name, 'Shipment booked'
+    FROM branches WHERE branch_id = p_origin_branch_id;
+
+    INSERT INTO payments (shipment_id, amount, payment_mode, payment_status)
+    VALUES (v_shipment_id, v_cost, 'Cash', 'Pending');
+
+    SELECT v_shipment_id AS new_shipment_id, v_tracking_number AS tracking_number, v_cost AS shipping_cost;
+END$$
+
+DELIMITER ;
+
+
+-- =====================================================================
+-- SECTION 6: DEMO QUERIES
+-- Run these one at a time after the sections above to see the database
+-- in action. Each is commented with what it demonstrates.
+-- =====================================================================
+
+-- Q1: Every shipment currently in transit, with full route + payment info
+SELECT * FROM vw_shipment_details WHERE current_status = 'In Transit';
+
+-- Q2: Revenue and delivery count per branch, busiest first
+SELECT * FROM vw_branch_performance ORDER BY total_revenue DESC;
+
+-- Q3: Top 3 employees by number of final deliveries handled
+SELECT e.full_name, e.role, COUNT(da.assignment_id) AS deliveries_handled
+FROM employees e
+JOIN delivery_assignments da ON e.employee_id = da.employee_id
+WHERE da.leg = 'Final Delivery'
+GROUP BY e.employee_id, e.full_name, e.role
+ORDER BY deliveries_handled DESC
+LIMIT 3;
+
+-- Q4: Full tracking history of shipment #1, most recent first
+SELECT status, location, updated_at, remarks
+FROM shipment_tracking
+WHERE shipment_id = 1
+ORDER BY updated_at DESC;
+
+-- Q5: Shipments that arrived later than promised, and by how many days
+SELECT tracking_number, booking_date, expected_delivery_date, delivered_date,
+       DATEDIFF(delivered_date, expected_delivery_date) AS days_late
+FROM shipments
+WHERE delivered_date IS NOT NULL AND delivered_date > expected_delivery_date;
+
+-- Q6: Customers who have booked more than one shipment (GROUP BY + HAVING)
+SELECT c.full_name, COUNT(s.shipment_id) AS shipments_booked
+FROM customers c
+JOIN shipments s ON c.customer_id = s.customer_id
+GROUP BY c.customer_id, c.full_name
+HAVING COUNT(s.shipment_id) > 1;
+
+-- Q7: Shipments with payment still pending
+SELECT tracking_number, sender_name, shipping_cost, payment_status
+FROM vw_shipment_details
+WHERE payment_status = 'Pending';
+
+-- Q8: Average shipping cost by package type
+SELECT package_type, ROUND(AVG(shipping_cost), 2) AS avg_cost, COUNT(*) AS total_shipments
+FROM shipments
+GROUP BY package_type;
+
+-- Q9: Book a brand-new shipment through the stored procedure
+CALL sp_book_shipment(2, 'Karan Malhotra', '9877766655', '90 MG Road, Bangalore',
+                       1, 3, 2.0, 'Parcel', '2026-09-20');
+
+-- Q10: Watch the trigger fire — log a tracking update, then check that
+--      the shipment's own status changed with no manual UPDATE needed
+INSERT INTO shipment_tracking (shipment_id, status, location, remarks)
+VALUES (4, 'Picked Up', 'Pune Hinjewadi Branch', 'Picked up from sender');
+
+SELECT current_status FROM shipments WHERE shipment_id = 4;
